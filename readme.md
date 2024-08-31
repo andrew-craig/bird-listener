@@ -1,6 +1,8 @@
 
 
 ## Installation
+Copy config.template.yaml to config.yaml and input latitude and longitude
+
 Install ffmpeg
 > sudo apt-get install ffmpeg
 

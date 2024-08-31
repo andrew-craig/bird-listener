@@ -10,6 +10,7 @@ import utils
 import config as cfg
 import species
 import sqlite3
+import yaml
 from zoneinfo import ZoneInfo
 from uuid_extensions import uuid7str
 from pathlib import Path
@@ -29,6 +30,7 @@ def startup(w_dir):
 
     script_dir = w_dir / 'BirdNET-Analyzer'
 
+
     cfg.MODEL_PATH = os.path.join(script_dir, cfg.MODEL_PATH)
     cfg.LABELS_FILE = os.path.join(script_dir, cfg.LABELS_FILE)
     cfg.TRANSLATED_LABELS_PATH = os.path.join(script_dir, cfg.TRANSLATED_LABELS_PATH)
@@ -36,19 +38,22 @@ def startup(w_dir):
     cfg.CODES_FILE = os.path.join(script_dir, cfg.CODES_FILE)
     cfg.ERROR_LOG_FILE = os.path.join(script_dir, cfg.ERROR_LOG_FILE)
     cfg.TFLITE_THREADS = 1
-    cfg.LATITUDE = -33.8
-    cfg.LONGITUDE = 151.2
-    cfg.WEEK = datetime.date.today().isocalendar()[1] # could change this to read from the recording file name
+    cfg.MIN_CONFIDENCE = 0.05
+    cfg.SIGMOID_SENSITIVITY = 1.0
+    cfg.CPU_THREADS = 1
+    cfg.SAMPLE_RATE = 48000
     cfg.CODES = analyze.loadCodes()
     cfg.LABELS = utils.readLines(cfg.LABELS_FILE)
     cfg.TRANSLATED_LABELS = cfg.LABELS
     cfg.LOCATION_FILTER_THRESHOLD = 0.03
+    cfg.WEEK = datetime.date.today().isocalendar()[1] # could change this to read from the recording file name
+    
+
+    conf = yaml.safe_load(open('config.yaml'))
+    cfg.LATITUDE = conf['latitude']
+    cfg.LONGITUDE = conf['longitude']
     cfg.SPECIES_LIST = species.getSpeciesList(cfg.LATITUDE, cfg.LONGITUDE, cfg.WEEK, cfg.LOCATION_FILTER_THRESHOLD)
-    cfg.MIN_CONFIDENCE = 0.05
-    cfg.SIGMOID_SENSITIVITY = 1.0
-    cfg.CPU_THREADS = 1
-    cfg.TFLITE_THREADS = 1
-    cfg.SAMPLE_RATE = 48000
+
 
     # add database configuraiton
     database = db_dir / 'bird-observations.db'
