@@ -150,7 +150,7 @@ async def analysis_worker(queue, max_queue_size, w_dir):
         print('Consumer started')
         # Get a "work item" out of the queue.
         start_ts, frames = await queue.get()
-        print('picked  up item off queue')
+        print('Picked up item off queue')
         if queue.qsize() <= max_queue_size:
             # analyse the file
             signal = convert_frame_to_signal(frames)

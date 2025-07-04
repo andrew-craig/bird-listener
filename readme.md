@@ -26,7 +26,7 @@ Create a virtual environment
 Activate the venv
 > source venv/bin/activate
 
-> pip install tflite-runtime librosa asyncio uuid7 pydub keras_tuner pyalsaaudio "numpy<2.0"
+> pip install tflite-runtime librosa asyncio uuid7 pydub keras_tuner pyalsaaudio "numpy<2.0" pyyaml
 
 Is librosa still needed?
 
