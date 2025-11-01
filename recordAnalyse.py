@@ -18,6 +18,7 @@ from pathlib import Path
 import pydub  # type: ignore
 import logging
 import sys
+import requests
 
 
 # Configure logging for Docker environment
@@ -192,6 +193,23 @@ def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path) -> list[st
 
             # close the connection
             connection.close()
+
+            # Call weather-server to save
+            for ob in data_to_insert:
+                try:
+                    payload = {
+                        "id": ob[0],
+                        "ts": ob[1],
+                        "scientific_name": ob[2],
+                        "common_name": ob[3],
+                        "confidence": ob[4],
+                    }
+                    # Send to weather-server
+                    r = requests.post(
+                        "http://127.0.0.1:8000/birds/latest", json=payload
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send data to weather-server: {e}")
 
         return filtered_detections
 
