@@ -45,10 +45,7 @@ RUN mkdir -p /app/recordings /app/db
 WORKDIR /app/BirdNET-Analyzer
 
 # Volume for persistent data
-VOLUME ["/app/recordings", "/app/db", "/app/config.yaml"]
-
-# Note: Users should mount their config.yaml file at runtime
-# docker run -v /path/to/config.yaml:/app/config.yaml ...
+VOLUME ["/app/recordings", "/app/db"]
 
 # Run the application
 CMD ["python", "recordAnalyse.py"]
