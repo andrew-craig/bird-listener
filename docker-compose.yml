@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   bird-listener:
     build: .
@@ -18,3 +16,4 @@ services:
       - LATITUDE=-10.0
       - LONGITUDE=20.0
       - INPUT_DEVICE_NAME=default
+      - LOG_LEVEL=INFO
