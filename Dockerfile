@@ -17,9 +17,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Clone BirdNET-Analyzer repository
-RUN git clone https://github.com/kahst/BirdNET-Analyzer.git
-COPY BirdNET-Analyzer/birdnet_analyzer /app/birdnet_analyzer
-RUN rm -rf BirdNET-Analyzer
+RUN git clone https://github.com/kahst/BirdNET-Analyzer.git && \
+    cp -r BirdNET-Analyzer/birdnet_analyzer /app/birdnet_analyzer && \
+    rm -rf BirdNET-Analyzer
 
 # Copy project files
 COPY pyproject.toml .
