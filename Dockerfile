@@ -16,27 +16,30 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy project files
-COPY pyproject.toml .
-COPY uv.lock .
-
 # Clone BirdNET-Analyzer repository
 RUN git clone https://github.com/kahst/BirdNET-Analyzer.git
-#RUN mkdir -p BirdNET-Analyzer/
+COPY BirdNET-Analyzer/birdnet_analyzer /app/birdnet_analyzer
+RUN rm -rf BirdNET-Analyzer
+
+# Copy project files
+COPY pyproject.toml .
+COPY recordAnalyse.py .
+
+RUN uv sync
 
 # Copy the record-analyse script into BirdNET-Analyzer directory
-COPY recordAnalyse.py ./BirdNET-Analyzer/
+
 
 # Download and setup the models
-#RUN mkdir -p BirdNET-Analyzer/birdnet_analyzer/checkpoints
-#WORKDIR /app/BirdNET-Analyzer/birdnet_analyzer/checkpoints
-#RUN wget https://tuc.cloud/index.php/s/886x39f5N3sdsAM/download/V2.4.zip
-#RUN unzip V2.4.zip
-#RUN rm V2.4.zip
-#WORKDIR /app
+RUN mkdir -p birdnet_analyzer/checkpoints
+WORKDIR /app/birdnet_analyzer/checkpoints
+RUN wget https://tuc.cloud/index.php/s/886x39f5N3sdsAM/download/V2.4.zip
+RUN unzip V2.4.zip
+RUN rm V2.4.zip
+WORKDIR /app
 
 # Install Python dependencies using uv
-RUN uv sync
+
 
 # Create directories for recordings and database
 RUN mkdir -p /app/recordings /app/db
