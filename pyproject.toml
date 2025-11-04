@@ -27,6 +27,7 @@ dependencies = [
     "asyncio",
     "uuid7",
     "pydub",
+    "keras",
     "keras_tuner",
     "pyalsaaudio",
     "numpy<2.0",
