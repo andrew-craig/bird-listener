@@ -22,9 +22,14 @@ classifiers = [
 ]
 
 dependencies = [
-    "librosa",
+    "librosa>=0.11",
+    "resampy",
+    "tensorflow>=2.20",
+    "tqdm",
+    "pandas",
+    "matplotlib",
+    "kagglehub",
     "tflite-runtime",
-    "asyncio",
     "uuid7",
     "pydub",
     "keras",
