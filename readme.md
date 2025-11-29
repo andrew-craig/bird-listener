@@ -17,7 +17,7 @@ Download the models
 > cd BirdNet-Analyzer/birdnet_analyzer
 > mkdir checkpoints
 > cd checkpoints
-> wget https://tuc.cloud/index.php/s/3BsizWy5M7CtQ5w/download/V2.4.zip
+> wget https://drive.google.com/file/d/1ixYBPbZK2Fh1niUQzadE2IWTFZlwATa3
 
 
 Create a virtual environment
