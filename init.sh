@@ -51,7 +51,7 @@ mkdir -p birdnet_analyzer/checkpoints
 echo "Downloading V2.4 model (this may take a while)..."
 cd birdnet_analyzer/checkpoints
 
-MODEL_URL="https://drive.google.com/file/d/1ixYBPbZK2Fh1niUQzadE2IWTFZlwATa3"
+MODEL_URL="https://drive.usercontent.google.com/download?id=1ixYBPbZK2Fh1niUQzadE2IWTFZlwATa3&export=download&authuser=0&confirm=t&uuid=b3c4c3ea-42eb-458a-baeb-104f03ef93b4"
 if command -v wget &> /dev/null; then
     wget -O V2.4.zip "$MODEL_URL"
 elif command -v curl &> /dev/null; then
