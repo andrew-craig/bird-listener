@@ -1,0 +1,15 @@
+librosa>=0.11
+resampy
+tensorflow>=2.20
+tqdm
+pandas
+matplotlib
+kagglehub
+tflite-runtime
+uuid7
+pydub
+keras
+keras_tuner
+pyalsaaudio
+numpy<2.0
+pyyaml
