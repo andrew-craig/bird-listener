@@ -10,39 +10,6 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-# Create birdnet_analyzer directory if it doesn't exist
-echo "Creating birdnet_analyzer directory..."
-mkdir -p birdnet_analyzer
-
-# Download BirdNET-Analyzer module files
-echo "Downloading BirdNET-Analyzer module from GitHub..."
-REPO_URL="https://github.com/birdnet-team/BirdNET-Analyzer"
-BRANCH="main"
-MODULE_PATH="birdnet_analyzer"
-
-# Download individual files from the birdnet_analyzer directory
-# Using GitHub's raw content URL
-RAW_BASE_URL="https://raw.githubusercontent.com/birdnet-team/BirdNET-Analyzer/${BRANCH}/${MODULE_PATH}"
-
-echo "Downloading Python module files..."
-# Create a temporary directory to clone just what we need
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR"
-
-# Clone the repository with sparse checkout
-git clone --depth 1 --filter=blob:none --sparse "$REPO_URL" .
-git sparse-checkout set "$MODULE_PATH"
-
-# Copy the birdnet_analyzer directory to the project
-cd -
-rm -rf birdnet_analyzer
-cp -r "$TEMP_DIR/$MODULE_PATH" ./
-
-# Clean up
-rm -rf "$TEMP_DIR"
-
-echo "BirdNET-Analyzer module downloaded successfully"
-
 # Create models directory
 echo "Creating models directory..."
 mkdir -p models
