@@ -43,13 +43,13 @@ rm -rf "$TEMP_DIR"
 
 echo "BirdNET-Analyzer module downloaded successfully"
 
-# Create checkpoints directory for models
-echo "Creating checkpoints directory..."
-mkdir -p birdnet_analyzer/checkpoints
+# Create models directory
+echo "Creating models directory..."
+mkdir -p models
 
 # Download the V2.4 model
 echo "Downloading V2.4 model (this may take a while)..."
-cd birdnet_analyzer/checkpoints
+cd models
 
 MODEL_URL="https://drive.usercontent.google.com/download?id=1ixYBPbZK2Fh1niUQzadE2IWTFZlwATa3&export=download&authuser=0&confirm=t&uuid=b3c4c3ea-42eb-458a-baeb-104f03ef93b4"
 if command -v wget &> /dev/null; then

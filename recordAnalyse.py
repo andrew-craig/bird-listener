@@ -7,10 +7,8 @@ import numpy as np
 import math
 import operator
 from typing import Any
-from birdnet_analyzer.analyze.utils import load_codes, predict  # type: ignore
-import birdnet_analyzer.utils as utils  # type: ignore
-import birdnet_analyzer.config as cfg  # type: ignore
-from birdnet_analyzer.species.utils import get_species_list  # type: ignore
+import predict as tflite_predict  # Our lightweight TFLite predictor
+import getSpecies  # Geographic species filtering
 import sqlite3
 from zoneinfo import ZoneInfo
 from uuid_extensions import uuid7str  # type: ignore
@@ -19,6 +17,7 @@ import pydub  # type: ignore
 import logging
 import sys
 import requests
+from config import BirdNetConfig
 
 
 # Configure logging for Docker environment
@@ -48,7 +47,15 @@ def confirm_dir(dir: Path) -> bool:
     return True
 
 
-def startup(w_dir: Path) -> None:
+def startup(w_dir: Path) -> BirdNetConfig:
+    """Initialize the application and return configuration.
+
+    Args:
+        w_dir: Working directory path
+
+    Returns:
+        BirdNetConfig instance with all runtime data loaded
+    """
     logger.info("Starting up bird-listener application")
     recording_dir = w_dir / "recordings"
     _ = confirm_dir(recording_dir)
@@ -58,45 +65,37 @@ def startup(w_dir: Path) -> None:
     _ = confirm_dir(db_dir)
     logger.info(f"Database directory: {db_dir}")
 
-    script_dir = w_dir / "BirdNET-Analyzer"
+    models_dir = w_dir / "models"
 
-    cfg.MODEL_PATH = os.path.join(script_dir, cfg.MODEL_PATH)
-    cfg.LABELS_FILE = os.path.join(
-        script_dir,
-        "birdnet_analyzer/labels/V2.4/BirdNET_GLOBAL_6K_V2.4_Labels_en_uk.txt",
-    )
-    cfg.TRANSLATED_LABELS_PATH = os.path.join(script_dir, cfg.TRANSLATED_LABELS_PATH)
-    cfg.MDATA_MODEL_PATH = os.path.join(script_dir, cfg.MDATA_MODEL_PATH)
-    cfg.CODES_FILE = os.path.join(script_dir, cfg.CODES_FILE)
-    cfg.ERROR_LOG_FILE = os.path.join(script_dir, cfg.ERROR_LOG_FILE)
-    cfg.TFLITE_THREADS = 1
-    cfg.MIN_CONFIDENCE = 0.05
-    cfg.SIGMOID_SENSITIVITY = 1.0
-    cfg.CPU_THREADS = 1
-    cfg.SAMPLE_RATE = 48000
+    # Create base configuration from environment
+    config = BirdNetConfig.from_env(models_dir)
 
-    cfg.CODES = load_codes()
-    cfg.LABELS = utils.read_lines(cfg.LABELS_FILE)
-    cfg.TRANSLATED_LABELS = cfg.LABELS
-    cfg.LOCATION_FILTER_THRESHOLD = 0.03
-    cfg.WEEK = datetime.date.today().isocalendar()[
-        1
-    ]  # could change this to read from the recording file name
-
-    # Read configuration from environment variables
-    cfg.LATITUDE = float(os.environ.get("LATITUDE", "-10.0"))
-    cfg.LONGITUDE = float(os.environ.get("LONGITUDE", "20.0"))
-    cfg.INPUT_DEVICE = os.environ.get("INPUT_DEVICE_NAME", "default")
     logger.info(
-        f"Configuration - Latitude: {cfg.LATITUDE}, Longitude: {cfg.LONGITUDE}, Input Device: {cfg.INPUT_DEVICE}"
+        f"Configuration - Latitude: {config.latitude}, Longitude: {config.longitude}, Input Device: {config.input_device}"
     )
 
-    cfg.SPECIES_LIST = get_species_list(
-        cfg.LATITUDE, cfg.LONGITUDE, cfg.WEEK, cfg.LOCATION_FILTER_THRESHOLD
-    )
-    logger.info(f"Loaded {len(cfg.SPECIES_LIST)} species for location filtering")
+    # Load labels from file
+    labels = config.labels_file.read_text(encoding="utf-8").splitlines()
 
-    # add database configuration
+    # Calculate current week for species filtering
+    week = datetime.date.today().isocalendar()[1]
+
+    # Initialize species predictor for geographic filtering
+    logger.info(f"Initializing species predictor with model: {config.mdata_model_path}")
+    getSpecies.init_species_predictor(str(config.mdata_model_path), config.tflite_threads)
+
+    # Get filtered species list for location
+    species_list = getSpecies.get_species_list(
+        config.latitude, config.longitude, week, labels, config.location_filter_threshold
+    )
+    logger.info(f"Loaded {len(species_list)} species for location filtering")
+
+    # Initialize the TFLite predictor with the model
+    logger.info(f"Initializing TFLite predictor with model: {config.model_path}")
+    tflite_predict.init_predictor(str(config.model_path), config.tflite_threads)
+    logger.info("TFLite predictor initialized successfully")
+
+    # Initialize database
     database = db_dir / "bird-observations.db"
     table_name = "observations"
     columns = (
@@ -114,6 +113,9 @@ def startup(w_dir: Path) -> None:
     connection.close()
     logger.info("Database initialized successfully")
 
+    # Return config with runtime data loaded
+    return config.with_runtime_data(labels, species_list)
+
 
 def convert_frame_to_signal(frames: list[bytes]) -> np.ndarray:
     signal = np.frombuffer(b"".join(frames), dtype=np.int16)  # type: ignore
@@ -121,10 +123,10 @@ def convert_frame_to_signal(frames: list[bytes]) -> np.ndarray:
 
 
 def save_audio(
-    species_name: str, signal: np.ndarray, start_ts: int, w_dir: Path
+    species_name: str, signal: np.ndarray, start_ts: int, w_dir: Path, config: BirdNetConfig
 ) -> bool:
     a = pydub.AudioSegment(  # type: ignore
-        signal.tobytes(), frame_rate=cfg.SAMPLE_RATE, sample_width=2, channels=1
+        signal.tobytes(), frame_rate=config.sample_rate, sample_width=2, channels=1
     )
     n = "ts_" + str(start_ts) + ".flac"
     d = w_dir / "recordings" / species_name
@@ -135,22 +137,28 @@ def save_audio(
     return True
 
 
-def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path) -> list[str]:
+def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path, config: BirdNetConfig) -> list[str]:
     # Convert standard signal to [-1,1] range
     scaled_sig: np.ndarray = signal / 32768
 
-    # Run the analysis
+    # Run the analysis using our lightweight TFLite predictor
     logger.debug("Running BirdNET analysis on audio signal")
-    pred = predict([scaled_sig])[0]  # type: ignore
+    pred = tflite_predict.predict([scaled_sig])[0]  # type: ignore
+
+    # Apply sigmoid if configured
+    if config.apply_sigmoid:
+        pred = tflite_predict.flat_sigmoid(
+            np.array(pred), sensitivity=-1, bias=config.sigmoid_sensitivity
+        )
 
     # Assign scores to labels
-    p_labels = zip(cfg.LABELS, pred)  # type: ignore
+    p_labels = zip(config.labels, pred)
 
     # Sort by score
     p_sorted = sorted(p_labels, key=operator.itemgetter(1), reverse=True)  # type: ignore
 
     # Filter for scores above the confidence threshold
-    predictions = list(filter(lambda x: (x[1] > cfg.MIN_CONFIDENCE), p_sorted))  # type: ignore
+    predictions = list(filter(lambda x: (x[1] > config.min_confidence), p_sorted))
 
     # SAVE THE RESULTS
     if len(predictions) == 0:
@@ -170,8 +178,8 @@ def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path) -> list[st
         data_to_insert: list[tuple[str, int, str, str, float]] = []
         filtered_detections: list[str] = []
         for p in predictions:
-            if p[1] > cfg.MIN_CONFIDENCE and (
-                not cfg.SPECIES_LIST or p[0] in cfg.SPECIES_LIST
+            if p[1] > config.min_confidence and (
+                not config.species_list or p[0] in config.species_list
             ):
                 species_names = p[0].split("_")
                 logger.info(f"{species_names[1]} detected (confidence: {p[1]:.2f})")
@@ -232,7 +240,7 @@ async def recording_worker(
 
 
 async def analysis_worker(
-    queue: asyncio.Queue[tuple[int, list[bytes]]], max_queue_size: int, w_dir: Path
+    queue: asyncio.Queue[tuple[int, list[bytes]]], max_queue_size: int, w_dir: Path, config: BirdNetConfig
 ) -> None:
     while True:
         logger.debug("Analysis worker waiting for queue item")
@@ -244,12 +252,12 @@ async def analysis_worker(
         if queue.qsize() <= max_queue_size:
             # analyse the file
             signal: np.ndarray = convert_frame_to_signal(frames)
-            _ = analyse_recording(start_ts, signal, w_dir)
+            _ = analyse_recording(start_ts, signal, w_dir, config)
 
             # save the file
             # EXCLUSION_LIST = ['Trichoglossus moluccanus_Rainbow Lorikeet','Cacatua galerita_Sulphur-crested Cockatoo','Strepera graculina_Pied Currawong','Alisterus scapularis_Australian King-Parrot','Fulica atra_Eurasian Cootz','Gymnorhina tibicen_Australian Magpie']
             # if len(detections) == 1 and detections[0] not in EXCLUSION_LIST:
-            #     save_audio(detections[0], signal, start_ts, w_dir)
+            #     save_audio(detections[0], signal, start_ts, w_dir, config)
 
             logger.debug("Analysis completed")
         else:
@@ -268,10 +276,10 @@ async def main() -> None:
     logger.info("Bird-listener application starting")
 
     w_dir: Path = Path.cwd().parent
-    startup(w_dir)
+    config = startup(w_dir)
     max_queue_size: int = 6
-    rate: int = cfg.SAMPLE_RATE  # type: ignore
-    input_device: str = cfg.INPUT_DEVICE  # type: ignore
+    rate: int = config.sample_rate
+    input_device: str = config.input_device
     record_seconds: int = 3
     period_size: int = 1024
     queue: asyncio.Queue[tuple[int, list[bytes]]] = asyncio.Queue()
@@ -294,7 +302,7 @@ async def main() -> None:
     logger.info("Starting recording and analysis workers")
 
     _ = await asyncio.gather(
-        asyncio.create_task(analysis_worker(queue, max_queue_size, w_dir)),
+        asyncio.create_task(analysis_worker(queue, max_queue_size, w_dir, config)),
         recording_worker(queue, input, s),
     )
 
