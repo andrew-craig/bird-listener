@@ -39,7 +39,6 @@ class SpeciesPredictor:
         self.interpreter = tflite.Interpreter(
             model_path=self.model_path,
             num_threads=self.num_threads,
-            experimental_op_resolver_type=tflite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES,
         )
         self.interpreter.allocate_tensors()
 
