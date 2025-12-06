@@ -37,11 +37,9 @@ class TFLitePredictor:
     def _load_model(self):
         """Load the TFLite model and allocate tensors."""
         # Load TFLite model and allocate tensors
-        # XNNPACK disabled because it doesn't support variable input size (batch size)
         self.interpreter = tflite.Interpreter(
             model_path=self.model_path,
             num_threads=self.num_threads,
-            experimental_op_resolver_type=tflite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES,
         )
         self.interpreter.allocate_tensors()
 
