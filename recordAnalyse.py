@@ -56,7 +56,6 @@ def startup(w_dir: Path) -> BirdNetConfig:
     Returns:
         BirdNetConfig instance with all runtime data loaded
     """
-    print(f"Working directory: {w_dir}")
     logger.info("Starting up bird-listener application")
     recording_dir = w_dir / "recordings"
     _ = confirm_dir(recording_dir)
@@ -69,7 +68,6 @@ def startup(w_dir: Path) -> BirdNetConfig:
     models_dir = w_dir / "models"
 
     # Create base configuration from environment
-    print(f"Models directory: {models_dir}")
     config = BirdNetConfig.from_env(models_dir)
 
     logger.info(
@@ -277,7 +275,7 @@ async def main() -> None:
     _ = setup_logging()
     logger.info("Bird-listener application starting")
 
-    w_dir: Path = Path.cwd().parent
+    w_dir: Path = Path.cwd()
     config = startup(w_dir)
     max_queue_size: int = 6
     rate: int = config.sample_rate
