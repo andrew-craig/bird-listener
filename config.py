@@ -86,7 +86,7 @@ class BirdNetConfig:
             species_list: List of species filtered by location and time
 
         Returns:
-            A new BirdNetConfig instance with runtime data populated
+            A new Config instance with runtime data populated
         """
         return replace(
             self,

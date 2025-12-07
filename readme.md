@@ -1,4 +1,9 @@
 
+## Overview
+
+This project is a stripped down adaptation of [BirdNetAnalyzer](https://github.com/birdnet-team/BirdNET-Analyzer) intended for running the classification model on a lightweight devices like the Raspberry Pi Zero 2 W. It does not support training.
+
+
 
 ## Installation
 Copy config.template.yaml to config.yaml and input latitude and longitude
@@ -6,19 +11,13 @@ Copy config.template.yaml to config.yaml and input latitude and longitude
 Install ffmpeg
 > sudo apt-get install ffmpeg
 
-Clone the BirdNet-Analyzer repository
-> git clone https://github.com/kahst/BirdNET-Analyzer.git
-(this will take a while)
-
-Copy the `record-analyse.py` script into the BirdNET-Analyzer directory
-> scp /path/to/file
-
 Download the models
-> cd BirdNet-Analyzer/birdnet_analyzer
-> mkdir checkpoints
-> cd checkpoints
+> mkdir models
+> cd models
 > wget https://drive.google.com/file/d/1ixYBPbZK2Fh1niUQzadE2IWTFZlwATa3
-
+> unzip -q V2.4.zip
+> mv V2.4/* .
+> rmdir V2.4
 
 Create a virtual environment
 > python -m venv venv
@@ -26,9 +25,7 @@ Create a virtual environment
 Activate the venv
 > source venv/bin/activate
 
-> pip install tflite-runtime librosa asyncio uuid7 pydub keras_tuner pyalsaaudio "numpy<2.0" pyyaml
-
-Is librosa still needed?
+> pip install -r requirements.txt
 
 Navigate to the systemd directory
 > cd /etc/systemd/system
@@ -43,8 +40,8 @@ Copy the below into the file. Check the username
     StartLimitBurst=5
 
     [Service]
-    ExecStart=/home/operator/bird-listener/venv/bin/python /home/operator/bird-listener/BirdNET-Analyzer/recordAnalyse.py
-    WorkingDirectory=/home/operator/bird-listener/BirdNET-Analyzer
+    ExecStart=/home/operator/bird-listener/venv/bin/python /home/operator/bird-listener/recordAnalyse.py
+    WorkingDirectory=/home/operator/bird-listener
     Restart=on-failure
     RestartSec=5s
 
