@@ -49,29 +49,70 @@ class BirdNetConfig:
     species_list: tuple[str, ...] = ()
 
     @classmethod
-    def from_env(cls, models_dir: Path) -> "BirdNetConfig":
+    def from_env(cls, models_dir: Path, logger=None) -> "BirdNetConfig":
         """Create configuration from environment variables and models directory.
 
         Args:
             models_dir: Path to the models directory containing BirdNET models
+            logger: Optional logger for debugging configuration loading
 
         Returns:
             A new BirdNetConfig instance with values from environment variables
             or defaults
         """
+        # Model paths
         model_path = models_dir / "BirdNET_GLOBAL_6K_V2.4_Model_FP32.tflite"
         labels_file = models_dir / "BirdNET_GLOBAL_6K_V2.4_Labels.txt"
         mdata_model_path = models_dir / "BirdNET_GLOBAL_6K_V2.4_MData_Model_FP16.tflite"
         error_log_file = models_dir / "error_log.txt"
+
+        # Check if environment variables are set (not just retrieving with defaults)
+        latitude_is_set = "LATITUDE" in os.environ
+        longitude_is_set = "LONGITUDE" in os.environ
+        input_device_is_set = "INPUT_DEVICE_NAME" in os.environ
+
+        # Read environment variables with explicit logging
+        latitude_str = os.environ.get("LATITUDE", "-10.0")
+        longitude_str = os.environ.get("LONGITUDE", "20.0")
+        input_device = os.environ.get("INPUT_DEVICE_NAME", "default")
+
+        if logger:
+            if not latitude_is_set:
+                logger.warning("LATITUDE environment variable not set, using default: -10.0")
+            if not longitude_is_set:
+                logger.warning("LONGITUDE environment variable not set, using default: 20.0")
+            if not input_device_is_set:
+                logger.info("INPUT_DEVICE_NAME not set, using default: 'default'")
+
+        # Convert to appropriate types
+        try:
+            latitude = float(latitude_str)
+        except ValueError:
+            if logger:
+                logger.error(f"Invalid LATITUDE value '{latitude_str}', using default -10.0")
+            latitude = -10.0
+
+        try:
+            longitude = float(longitude_str)
+        except ValueError:
+            if logger:
+                logger.error(f"Invalid LONGITUDE value '{longitude_str}', using default 20.0")
+            longitude = 20.0
+
+        # Log the loaded values for debugging
+        if logger:
+            logger.info(f"LATITUDE: {latitude_str} -> {latitude}")
+            logger.info(f"LONGITUDE: {longitude_str} -> {longitude}")
+            logger.info(f"INPUT_DEVICE_NAME: {input_device}")
 
         return cls(
             model_path=model_path,
             labels_file=labels_file,
             mdata_model_path=mdata_model_path,
             error_log_file=error_log_file,
-            latitude=float(os.environ.get("LATITUDE", "-10.0")),
-            longitude=float(os.environ.get("LONGITUDE", "20.0")),
-            input_device=os.environ.get("INPUT_DEVICE_NAME", "default"),
+            latitude=latitude,
+            longitude=longitude,
+            input_device=input_device,
         )
 
     def with_runtime_data(

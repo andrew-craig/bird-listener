@@ -68,10 +68,11 @@ def startup(w_dir: Path) -> BirdNetConfig:
     models_dir = w_dir / "models"
 
     # Create base configuration from environment
-    config = BirdNetConfig.from_env(models_dir)
+    logger.info("Loading configuration from environment variables")
+    config = BirdNetConfig.from_env(models_dir, logger=logger)
 
     logger.info(
-        f"Configuration - Latitude: {config.latitude}, Longitude: {config.longitude}, Input Device: {config.input_device}"
+        f"Configuration loaded - Latitude: {config.latitude}, Longitude: {config.longitude}, Input Device: {config.input_device}"
     )
 
     # Load labels from file

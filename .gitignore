@@ -1,5 +1,8 @@
-config.yaml
-birdnet_analyzer
 .env
 .DS_Store
 models/
+venv/
+.venv/
+db/
+recordings/
+test_config.py
