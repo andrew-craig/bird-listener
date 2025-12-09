@@ -7,6 +7,10 @@ the dependency on birdnet_analyzer.config with a dataclass-based approach.
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
 
 
 @dataclass(frozen=True)

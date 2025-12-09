@@ -1,14 +1,8 @@
-librosa>=0.11
-resampy
-tqdm
-pandas
-matplotlib
-kagglehub
 tflite-runtime
 uuid7
 pydub
 pyalsaaudio
 numpy<2.0
-pyyaml
 tflite-support
 requests
+python-dotenv
