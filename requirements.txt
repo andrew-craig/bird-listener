@@ -3,6 +3,5 @@ uuid7
 pydub
 pyalsaaudio
 numpy<2.0
-tflite-support
 requests
 python-dotenv
