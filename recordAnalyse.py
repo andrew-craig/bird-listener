@@ -92,6 +92,65 @@ def confirm_dir(dir: Path) -> bool:
     return True
 
 
+def find_working_capture_device(preferred_device: str) -> str:
+    """Find a working ALSA capture device.
+
+    Args:
+        preferred_device: Device name from configuration to try first
+
+    Returns:
+        Name of a working capture device
+
+    Raises:
+        RuntimeError: If no working capture device is found
+    """
+    # Get list of available PCM devices
+    try:
+        pcm_list = alsaaudio.pcms(alsaaudio.PCM_CAPTURE)  # type: ignore
+        logger.info(f"Available ALSA capture devices: {pcm_list}")
+    except Exception as e:
+        logger.error(f"Failed to list ALSA capture devices: {e}")
+        pcm_list = []
+
+    # Try the preferred device first if it's in the list
+    devices_to_try = []
+    if preferred_device in pcm_list:
+        devices_to_try.append(preferred_device)
+
+    # Add all other devices
+    devices_to_try.extend([d for d in pcm_list if d != preferred_device])
+
+    # If preferred device wasn't in the list but isn't "default", still try it
+    if preferred_device not in pcm_list and preferred_device != "default":
+        devices_to_try.insert(0, preferred_device)
+
+    # Try each device
+    for device in devices_to_try:
+        logger.info(f"Testing capture device: {device}")
+        try:
+            # Try to open the device with minimal configuration
+            test_pcm = alsaaudio.PCM(  # type: ignore
+                alsaaudio.PCM_CAPTURE,
+                alsaaudio.PCM_NORMAL,
+                channels=1,
+                rate=48000,
+                format=alsaaudio.PCM_FORMAT_S16_LE,
+                periodsize=1024,
+                device=device,
+            )
+            test_pcm.close()  # type: ignore
+            logger.info(f"Successfully opened capture device: {device}")
+            return device
+        except alsaaudio.ALSAAudioError as e:  # type: ignore
+            logger.warning(f"Device '{device}' failed to open: {e}")
+            continue
+
+    # If we get here, no device worked
+    error_msg = f"No working ALSA capture device found. Tried: {devices_to_try}"
+    logger.error(error_msg)
+    raise RuntimeError(error_msg)
+
+
 def startup(w_dir: Path) -> BirdNetConfig:
     """Initialize the application and return configuration.
 
@@ -325,12 +384,19 @@ async def main() -> None:
     config = startup(w_dir)
     max_queue_size: int = 6
     rate: int = config.sample_rate
-    input_device: str = config.input_device
     record_seconds: int = 3
     period_size: int = 1024
     queue: asyncio.Queue[tuple[int, list[bytes]]] = asyncio.Queue()
 
-    logger.info(f"Initializing audio input device: {input_device}")
+    # Find a working capture device
+    logger.info(f"Preferred audio input device from config: {config.input_device}")
+    try:
+        input_device = find_working_capture_device(config.input_device)
+        logger.info(f"Using capture device: {input_device}")
+    except RuntimeError as e:
+        logger.error(f"Failed to find working capture device: {e}")
+        raise
+
     logger.info(f"Sample rate: {rate} Hz, Record duration: {record_seconds}s")
 
     input = alsaaudio.PCM(  # type: ignore
