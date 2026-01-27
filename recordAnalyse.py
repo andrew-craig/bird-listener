@@ -17,21 +17,66 @@ import pydub  # type: ignore
 import logging
 import sys
 import requests
+import json
 from config import BirdNetConfig
+
+
+class JSONFormatter(logging.Formatter):
+    """Format log records as JSON for structured logging."""
+
+    # Standard LogRecord attributes to exclude from extra fields
+    RESERVED_ATTRS = {
+        "name",
+        "msg",
+        "args",
+        "created",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "asctime",
+    }
+
+    def format(self, record):
+        log_data = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+
+        # Add any custom fields from extra parameter
+        for key, value in record.__dict__.items():
+            if key not in self.RESERVED_ATTRS:
+                log_data[key] = value
+
+        return json.dumps(log_data)
 
 
 # Configure logging for Docker environment
 def setup_logging() -> logging.Logger:
     """Configure logging to output to stdout for Docker container logs."""
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    log_format = os.environ.get(
-        "LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JSONFormatter())
 
     logging.basicConfig(
         level=getattr(logging, log_level, logging.INFO),
-        format=log_format,
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[handler],
         force=True,
     )
 
