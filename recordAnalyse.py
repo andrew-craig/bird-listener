@@ -295,7 +295,7 @@ def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path, config: Bi
                 species_names = p[0].split("_")
                 logger.info(f"{species_names[1]} detected (confidence: {p[1]:.2f})")
                 data_to_insert.append(
-                    (uuid7str(), start_ts, species_names[0], species_names[1], p[1])
+                    (uuid7str(), start_ts, species_names[0], species_names[1], float(p[1]))
                 )
                 filtered_detections.append(p[0])
 
