@@ -50,6 +50,11 @@ class JSONFormatter(logging.Formatter):
         "asctime",
     }
 
+    def formatTime(self, record, datefmt=None):
+        """Format timestamp in RFC 3339 / ISO 8601 format."""
+        dt = datetime.datetime.fromtimestamp(record.created, tz=datetime.timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}Z"
+
     def format(self, record):
         log_data = {
             "timestamp": self.formatTime(record),
