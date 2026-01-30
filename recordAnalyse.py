@@ -61,6 +61,7 @@ class JSONFormatter(logging.Formatter):
             "level": record.levelname,
             "message": record.getMessage(),
             "logger": record.name,
+            "service": "bird-listener",
         }
 
         # Add any custom fields from extra parameter
