@@ -6,3 +6,4 @@ venv/
 db/
 recordings/
 test_config.py
+__pycache__/
