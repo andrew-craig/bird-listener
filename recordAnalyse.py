@@ -228,9 +228,41 @@ def startup(w_dir: Path) -> BirdNetConfig:
     return config.with_runtime_data(labels, species_list)
 
 
+# BirdNET model expects exactly this many samples (3 seconds at 48kHz)
+EXPECTED_SAMPLE_COUNT = 144000
+
+
 def convert_frame_to_signal(frames: list[bytes]) -> np.ndarray:
     signal = np.frombuffer(b"".join(frames), dtype=np.int16)  # type: ignore
     return signal
+
+
+def normalize_signal_length(signal: np.ndarray, expected_length: int = EXPECTED_SAMPLE_COUNT) -> np.ndarray:
+    """Pad or trim audio signal to exact expected length for TFLite model.
+
+    The BirdNET TFLite model requires exactly 144,000 samples. ALSA period-based
+    recording may produce slightly more or fewer samples due to integer rounding.
+    This function ensures the signal matches the expected length exactly.
+
+    Args:
+        signal: Audio signal as numpy array
+        expected_length: Expected number of samples (default: 144000)
+
+    Returns:
+        Signal padded with zeros or trimmed to exact expected length
+    """
+    current_length = len(signal)
+    if current_length == expected_length:
+        return signal
+    elif current_length < expected_length:
+        # Pad with zeros at the end
+        padding = expected_length - current_length
+        logger.debug(f"Padding signal with {padding} zeros ({current_length} -> {expected_length})")
+        return np.pad(signal, (0, padding), mode='constant', constant_values=0)
+    else:
+        # Trim excess samples from the end
+        logger.debug(f"Trimming signal by {current_length - expected_length} samples ({current_length} -> {expected_length})")
+        return signal[:expected_length]
 
 
 def save_audio(
@@ -249,6 +281,9 @@ def save_audio(
 
 
 def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path, config: BirdNetConfig) -> list[str]:
+    # Ensure signal is exactly the length the model expects
+    signal = normalize_signal_length(signal)
+
     # Convert standard signal to [-1,1] range
     scaled_sig: np.ndarray = signal / 32768
 
