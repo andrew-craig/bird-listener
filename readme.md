@@ -8,9 +8,6 @@ This project is a stripped down adaptation of [BirdNetAnalyzer](https://github.c
 ## Installation
 Copy config.template.yaml to config.yaml and input latitude and longitude
 
-Install ffmpeg
-> sudo apt-get install ffmpeg
-
 Download the models
 > mkdir models
 > cd models
@@ -40,13 +37,33 @@ Copy the below into the file. Check the username
     StartLimitBurst=5
 
     [Service]
+    User=operator
+    Group=operator
+    SupplementaryGroups=audio
     ExecStart=/home/operator/bird-listener/venv/bin/python /home/operator/bird-listener/recordAnalyse.py
     WorkingDirectory=/home/operator/bird-listener
     Restart=on-failure
     RestartSec=5s
+    # Fewer glibc malloc arenas: less memory fragmentation from worker threads
+    Environment=MALLOC_ARENA_MAX=2
+    # Hardening: a mic listener needs no root and only writes to db/
+    NoNewPrivileges=true
+    ProtectSystem=strict
+    ReadWritePaths=/home/operator/bird-listener/db
+    PrivateTmp=true
+    ProtectKernelTunables=true
+    ProtectKernelModules=true
+    ProtectControlGroups=true
 
     [Install]
     WantedBy=multi-user.target
+
+The service runs as `operator` (not root) and can only write to `db/`, so create that directory and make sure the user can use the mic
+> mkdir -p /home/operator/bird-listener/db
+
+> sudo chown -R operator:operator /home/operator/bird-listener/db
+
+> sudo usermod -aG audio operator
 
 > sudo systemctl enable bird-listener.service
 

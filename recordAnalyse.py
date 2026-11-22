@@ -1,23 +1,24 @@
 # pyright: reportMissingImports=false
 import asyncio
 import datetime
+import gc
+import http.client
+import json
+import logging
 import os
+import sqlite3
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
 import alsaaudio  # type: ignore
 import numpy as np
-import math
-import operator
-from typing import Any
-import predict as tflite_predict  # Our lightweight TFLite predictor
-import getSpecies  # Geographic species filtering
-import sqlite3
-from zoneinfo import ZoneInfo
 from uuid_extensions import uuid7str  # type: ignore
-from pathlib import Path
-import pydub  # type: ignore
-import logging
-import sys
-import requests
-import json
+
+import getSpecies  # Geographic species filtering
+import predict as tflite_predict  # Our lightweight TFLite predictor
 from config import BirdNetConfig
 
 
@@ -44,6 +45,7 @@ class JSONFormatter(logging.Formatter):
         "relativeCreated",
         "thread",
         "threadName",
+        "taskName",
         "exc_info",
         "exc_text",
         "stack_info",
@@ -69,6 +71,9 @@ class JSONFormatter(logging.Formatter):
             if key not in self.RESERVED_ATTRS:
                 log_data[key] = value
 
+        if record.exc_info:
+            log_data["exc_info"] = self.formatException(record.exc_info)
+
         return json.dumps(log_data)
 
 
@@ -90,6 +95,24 @@ def setup_logging() -> logging.Logger:
 
 
 logger = logging.getLogger(__name__)
+
+# BirdNET model expects exactly this many samples (3 seconds at 48kHz)
+EXPECTED_SAMPLE_COUNT = 144000
+
+# Max number of 3s chunks waiting for analysis. When full, the oldest chunk is
+# dropped so memory stays bounded (~288KB per chunk) if analysis falls behind.
+MAX_QUEUE_SIZE = 3
+
+# How often to log a summary of activity at INFO level
+SUMMARY_INTERVAL_SECONDS = 3600
+
+# weather-server endpoint that receives each observation
+WEATHER_SERVER_HOST = "127.0.0.1"
+WEATHER_SERVER_PORT = 8000
+WEATHER_SERVER_PATH = "/birds/latest"
+WEATHER_SERVER_TIMEOUT_SECONDS = 5.0
+
+DB_TABLE = "observations"
 
 
 def confirm_dir(dir: Path) -> bool:
@@ -157,24 +180,16 @@ def find_working_capture_device(preferred_device: str) -> str:
     raise RuntimeError(error_msg)
 
 
-def startup(w_dir: Path) -> BirdNetConfig:
-    """Initialize the application and return configuration.
+def startup(w_dir: Path) -> tuple[BirdNetConfig, getSpecies.WeeklySpeciesMasks]:
+    """Initialize models and return configuration and the weekly species filter.
 
     Args:
         w_dir: Working directory path
 
     Returns:
-        BirdNetConfig instance with all runtime data loaded
+        BirdNetConfig instance with labels loaded, and the per-week species masks
     """
     logger.info("Starting up bird-listener application")
-    recording_dir = w_dir / "recordings"
-    _ = confirm_dir(recording_dir)
-    logger.info(f"Recording directory: {recording_dir}")
-
-    db_dir = w_dir / "db"
-    _ = confirm_dir(db_dir)
-    logger.info(f"Database directory: {db_dir}")
-
     models_dir = w_dir / "models"
 
     # Create base configuration from environment
@@ -188,232 +203,316 @@ def startup(w_dir: Path) -> BirdNetConfig:
     # Load labels from file
     labels = config.labels_file.read_text(encoding="utf-8").splitlines()
 
-    # Calculate current week for species filtering
-    week = datetime.date.today().isocalendar()[1]
-
-    # Initialize species predictor for geographic filtering
+    # The metadata model is only needed at startup: compute the location
+    # filter for all 48 BirdNET weeks now, then free the model before loading
+    # the (much larger) main model. The analyser picks the mask for the
+    # current date, so the filter follows the season without reloading.
     logger.info(f"Initializing species predictor with model: {config.mdata_model_path}")
     getSpecies.init_species_predictor(str(config.mdata_model_path), config.tflite_threads)
-
-    # Get filtered species list for location
-    species_list = getSpecies.get_species_list(
-        config.latitude, config.longitude, week, labels, config.location_filter_threshold
+    weekly_masks = getSpecies.build_weekly_masks(
+        config.latitude, config.longitude, len(labels), config.location_filter_threshold
     )
-    logger.info(f"Loaded {len(species_list)} species for location filtering")
+    getSpecies.release_species_predictor()
+    gc.collect()
+    logger.info("Computed location species filter for all 48 weeks")
 
     # Initialize the TFLite predictor with the model
     logger.info(f"Initializing TFLite predictor with model: {config.model_path}")
-    tflite_predict.init_predictor(str(config.model_path), config.tflite_threads)
+    tflite_predict.init_predictor(
+        str(config.model_path), config.tflite_threads, EXPECTED_SAMPLE_COUNT
+    )
     logger.info("TFLite predictor initialized successfully")
 
-    # Initialize database
-    database = db_dir / "bird-observations.db"
-    table_name = "observations"
-    columns = (
-        "id text, ts integer, scientific_name txt, common_name txt, confidence real"
-    )
-    logger.info(f"Initializing database: {database}")
-    connection = sqlite3.connect(database)
-    cursor = connection.cursor()
-    _ = cursor.execute(
-        """CREATE TABLE IF NOT EXISTS {table_name} ({columns})""".format(
-            table_name=table_name, columns=columns
-        )
-    )
-    connection.commit()
-    connection.close()
-    logger.info("Database initialized successfully")
-
     # Return config with runtime data loaded
-    return config.with_runtime_data(labels, species_list)
+    return config.with_runtime_data(labels), weekly_masks
 
 
-# BirdNET model expects exactly this many samples (3 seconds at 48kHz)
-EXPECTED_SAMPLE_COUNT = 144000
+@dataclass
+class Stats:
+    """Counters for the periodic INFO summary."""
+
+    chunks_analysed: int = 0
+    chunks_dropped: int = 0
+    capture_overruns: int = 0
+    detections: int = 0
+    post_failures: int = 0
+    inference_seconds: float = 0.0
+
+    def log_and_reset(self, interval_seconds: float) -> None:
+        avg_ms = (
+            1000 * self.inference_seconds / self.chunks_analysed
+            if self.chunks_analysed
+            else 0.0
+        )
+        logger.info(
+            "Summary: %d chunks analysed, %d dropped, %d capture overruns, "
+            "%d detections, %d failed posts, avg inference %.0f ms",
+            self.chunks_analysed,
+            self.chunks_dropped,
+            self.capture_overruns,
+            self.detections,
+            self.post_failures,
+            avg_ms,
+            extra={"interval_seconds": round(interval_seconds)},
+        )
+        self.chunks_analysed = 0
+        self.chunks_dropped = 0
+        self.capture_overruns = 0
+        self.detections = 0
+        self.post_failures = 0
+        self.inference_seconds = 0.0
 
 
-def convert_frame_to_signal(frames: list[bytes]) -> np.ndarray:
-    signal = np.frombuffer(b"".join(frames), dtype=np.int16)  # type: ignore
-    return signal
+class AudioChunker:
+    """Reads fixed-size chunks of exactly ``chunk_samples`` from an ALSA PCM.
 
-
-def normalize_signal_length(signal: np.ndarray, expected_length: int = EXPECTED_SAMPLE_COUNT) -> np.ndarray:
-    """Pad or trim audio signal to exact expected length for TFLite model.
-
-    The BirdNET TFLite model requires exactly 144,000 samples. ALSA period-based
-    recording may produce slightly more or fewer samples due to integer rounding.
-    This function ensures the signal matches the expected length exactly.
-
-    Args:
-        signal: Audio signal as numpy array
-        expected_length: Expected number of samples (default: 144000)
-
-    Returns:
-        Signal padded with zeros or trimmed to exact expected length
+    Each period is copied straight into a preallocated int16 array, so there
+    is no list of byte strings to join and no padding/trimming afterwards.
+    Samples from a period that straddles a chunk boundary are carried over
+    to the start of the next chunk, so no audio is lost between chunks.
     """
-    current_length = len(signal)
-    if current_length == expected_length:
-        return signal
-    elif current_length < expected_length:
-        # Pad with zeros at the end
-        padding = expected_length - current_length
-        logger.debug(f"Padding signal with {padding} zeros ({current_length} -> {expected_length})")
-        return np.pad(signal, (0, padding), mode='constant', constant_values=0)
-    else:
-        # Trim excess samples from the end
-        logger.debug(f"Trimming signal by {current_length - expected_length} samples ({current_length} -> {expected_length})")
-        return signal[:expected_length]
+
+    def __init__(self, pcm: Any, stats: Stats, chunk_samples: int = EXPECTED_SAMPLE_COUNT):
+        self.pcm = pcm
+        self.stats = stats
+        self.chunk_samples = chunk_samples
+        self._carry: np.ndarray = np.empty(0, dtype=np.int16)
+
+    def read_chunk(self) -> tuple[int, np.ndarray]:
+        """Block until a full chunk has been captured. Run this in a thread."""
+        start_ts = int(time.time())
+        chunk = np.empty(self.chunk_samples, dtype=np.int16)
+        filled = len(self._carry)
+        chunk[:filled] = self._carry
+        self._carry = np.empty(0, dtype=np.int16)
+
+        while filled < self.chunk_samples:
+            length, data = self.pcm.read()  # type: ignore
+            if length <= 0:
+                # Negative length means an overrun (-EPIPE); pyalsaaudio has
+                # already re-prepared the stream, so just keep reading.
+                if length < 0:
+                    self.stats.capture_overruns += 1
+                    logger.debug("ALSA capture overrun (%d)", length)
+                continue
+            samples = np.frombuffer(data, dtype=np.int16)
+            take = min(len(samples), self.chunk_samples - filled)
+            chunk[filled : filled + take] = samples[:take]
+            filled += take
+            if take < len(samples):
+                self._carry = samples[take:].copy()
+
+        return start_ts, chunk
 
 
-def save_audio(
-    species_name: str, signal: np.ndarray, start_ts: int, w_dir: Path, config: BirdNetConfig
-) -> bool:
-    a = pydub.AudioSegment(  # type: ignore
-        signal.tobytes(), frame_rate=config.sample_rate, sample_width=2, channels=1
-    )
-    n = "ts_" + str(start_ts) + ".flac"
-    d = w_dir / "recordings" / species_name
-    _ = confirm_dir(d)
-    fn = d / n
-    a.export(fn, format="flac")  # type: ignore
-    logger.debug(f"Saved audio file: {fn}")
-    return True
+class WeatherServerClient:
+    """Posts observations to weather-server over a reused keep-alive connection.
+
+    Uses the standard library's http.client rather than ``requests``, which
+    saves ~10MB of resident memory, and always applies a timeout.
+    """
+
+    def __init__(self, host: str, port: int, path: str, timeout: float):
+        self.host = host
+        self.port = port
+        self.path = path
+        self.timeout = timeout
+        self._conn: http.client.HTTPConnection | None = None
+
+    def _close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def post(self, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        # One retry, only when a reused keep-alive connection turns out to be
+        # stale (the server closed it while idle).
+        for attempt in range(2):
+            reused = self._conn is not None
+            if self._conn is None:
+                self._conn = http.client.HTTPConnection(
+                    self.host, self.port, timeout=self.timeout
+                )
+            try:
+                self._conn.request("POST", self.path, body, headers)
+                response = self._conn.getresponse()
+                response.read()
+                if response.will_close:
+                    self._close()
+                if response.status >= 400:
+                    raise RuntimeError(f"weather-server returned HTTP {response.status}")
+                return
+            except (
+                http.client.RemoteDisconnected,
+                BrokenPipeError,
+                ConnectionResetError,
+            ):
+                self._close()
+                if not reused or attempt == 1:
+                    raise
+            except Exception:
+                self._close()
+                raise
 
 
-def analyse_recording(start_ts: int, signal: np.ndarray, w_dir: Path, config: BirdNetConfig) -> list[str]:
-    # Ensure signal is exactly the length the model expects
-    signal = normalize_signal_length(signal)
+class Analyser:
+    """Runs inference on audio chunks and stores/forwards detections.
 
-    # Convert standard signal to [-1,1] range
-    scaled_sig: np.ndarray = signal / 32768
+    Holds long-lived resources (SQLite connection, HTTP connection, a reusable
+    float32 input buffer and a precomputed species mask) so nothing heavy is
+    created per chunk. ``process`` is called from a worker thread, one chunk
+    at a time.
+    """
 
-    # Run the analysis using our lightweight TFLite predictor
-    logger.debug("Running BirdNET analysis on audio signal")
-    pred = tflite_predict.predict([scaled_sig])[0]  # type: ignore
+    def __init__(
+        self,
+        config: BirdNetConfig,
+        weekly_masks: getSpecies.WeeklySpeciesMasks,
+        db_path: Path,
+        stats: Stats,
+    ):
+        self.config = config
+        self.weekly_masks = weekly_masks
+        self.stats = stats
+        self.labels = config.labels
 
-    # Apply sigmoid if configured
-    if config.apply_sigmoid:
-        pred = tflite_predict.flat_sigmoid(
-            np.array(pred), sensitivity=-1, bias=config.sigmoid_sensitivity
+        # Reused for every chunk: int16 -> float32 [-1, 1] without temporaries
+        self._input = np.empty(EXPECTED_SAMPLE_COUNT, dtype=np.float32)
+        self._scale = np.float32(1.0 / 32768.0)
+
+        logger.info(f"Initializing database: {db_path}")
+        # Only ever used by one analysis call at a time, but that call may run
+        # on any thread of the default executor.
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute(
+            f"CREATE TABLE IF NOT EXISTS {DB_TABLE} "
+            "(id text, ts integer, scientific_name txt, common_name txt, confidence real)"
+        )
+        self.db.commit()
+        logger.info("Database initialized successfully")
+
+        self.weather_server = WeatherServerClient(
+            WEATHER_SERVER_HOST,
+            WEATHER_SERVER_PORT,
+            WEATHER_SERVER_PATH,
+            WEATHER_SERVER_TIMEOUT_SECONDS,
         )
 
-    # Assign scores to labels
-    p_labels = zip(config.labels, pred)
+    def close(self) -> None:
+        self.db.close()
 
-    # Sort by score
-    p_sorted = sorted(p_labels, key=operator.itemgetter(1), reverse=True)  # type: ignore
+    def process(self, start_ts: int, signal: np.ndarray) -> list[str]:
+        """Analyse one chunk; returns the labels of stored detections."""
+        np.multiply(signal, self._scale, out=self._input, dtype=np.float32)
 
-    # Filter for scores above the confidence threshold
-    predictions = list(filter(lambda x: (x[1] > config.min_confidence), p_sorted))
+        t0 = time.perf_counter()
+        pred = tflite_predict.predict(self._input)
+        self.stats.inference_seconds += time.perf_counter() - t0
+        self.stats.chunks_analysed += 1
 
-    # SAVE THE RESULTS
-    if len(predictions) == 0:
-        logger.debug("No detections above confidence threshold")
-        return []
-    else:
-        # pull the timestamp from the file name
-        logger.info(f"Detected {len(predictions)} sounds above confidence threshold")
-
-        ## save to the db
-        database = w_dir / "db" / "bird-observations.db"
-        table_name = "observations"
-        connection = sqlite3.connect(database)
-        cursor = connection.cursor()
-
-        # reformat the data
-        data_to_insert: list[tuple[str, int, str, str, float]] = []
-        filtered_detections: list[str] = []
-        for p in predictions:
-            if p[1] > config.min_confidence and (
-                not config.species_list or p[0] in config.species_list
-            ):
-                species_names = p[0].split("_")
-                logger.info(f"{species_names[1]} detected (confidence: {p[1]:.2f})")
-                data_to_insert.append(
-                    (uuid7str(), start_ts, species_names[0], species_names[1], float(p[1]))
-                )
-                filtered_detections.append(p[0])
-
-        if len(data_to_insert) > 0:
-            # insert to table and commit change
-            _ = cursor.executemany(
-                "INSERT INTO {table_name} VALUES(?, ?, ?, ?, ?)".format(
-                    table_name=table_name
-                ),
-                data_to_insert,
+        if self.config.apply_sigmoid:
+            pred = tflite_predict.flat_sigmoid(
+                pred, sensitivity=-1, bias=self.config.sigmoid_sensitivity
             )
-            connection.commit()
-            logger.info(f"Inserted {len(data_to_insert)} detections into database")
 
-            # close the connection
-            connection.close()
+        # Location/season filter for the chunk's local date (cached per week)
+        week, allowed_mask, changed = self.weekly_masks.for_date(
+            datetime.date.fromtimestamp(start_ts)
+        )
+        if changed:
+            logger.info(
+                "Species filter set for BirdNET week %d: %d species",
+                week,
+                int(allowed_mask.sum()),
+            )
 
-            # Call weather-server to save
-            for ob in data_to_insert:
-                try:
-                    payload = {
-                        "id": ob[0],
-                        "ts": ob[1],
-                        "scientific_name": ob[2],
-                        "common_name": ob[3],
-                        "confidence": ob[4],
-                    }
-                    # Send to weather-server
-                    r = requests.post(
-                        "http://127.0.0.1:8000/birds/latest", json=payload
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send data to weather-server: {e}")
+        # Only the few labels above threshold (and allowed for this location)
+        # are pulled out and sorted, instead of sorting all ~6.5k labels.
+        idx = np.flatnonzero((pred > self.config.min_confidence) & allowed_mask)
+        if idx.size == 0:
+            logger.debug("No detections above confidence threshold")
+            return []
+        idx = idx[np.argsort(pred[idx])[::-1]]
 
-        return filtered_detections
+        rows: list[tuple[str, int, str, str, float]] = []
+        for i in idx:
+            scientific_name, common_name = self.labels[i].split("_", 1)
+            rows.append((uuid7str(), start_ts, scientific_name, common_name, float(pred[i])))
+
+        self.db.executemany(f"INSERT INTO {DB_TABLE} VALUES(?, ?, ?, ?, ?)", rows)
+        self.db.commit()
+        self.stats.detections += len(rows)
+
+        logger.info(
+            "Detected %s",
+            ", ".join(f"{r[3]} ({r[4]:.2f})" for r in rows),
+            extra={
+                "detections": [
+                    {"common_name": r[3], "confidence": round(r[4], 3)} for r in rows
+                ]
+            },
+        )
+
+        for ob in rows:
+            payload = {
+                "id": ob[0],
+                "ts": ob[1],
+                "scientific_name": ob[2],
+                "common_name": ob[3],
+                "confidence": ob[4],
+            }
+            try:
+                self.weather_server.post(payload)
+                logger.debug("Sent observation %s to weather-server", ob[0])
+            except Exception as e:
+                self.stats.post_failures += 1
+                logger.error(f"Failed to send data to weather-server: {e}")
+
+        return [self.labels[i] for i in idx]
 
 
 async def recording_worker(
-    queue: asyncio.Queue[tuple[int, list[bytes]]],
-    input_device: Any,  # alsaaudio.PCM object
-    num_periods: int = 140,
+    queue: asyncio.Queue[tuple[int, np.ndarray]],
+    chunker: AudioChunker,
+    stats: Stats,
 ) -> None:
     while True:
-        start_ts: int = int(datetime.datetime.now(tz=ZoneInfo("UTC")).timestamp())
-        frames: list[bytes] = []
-        for _ in range(num_periods):
-            _length, data = input_device.read()  # type: ignore
-            frames.append(data)
-            await asyncio.sleep(0.01)
+        # Blocking ALSA reads run in a thread, so the event loop is not woken
+        # per period and there are no sleep() gaps that could overrun ALSA.
+        item = await asyncio.to_thread(chunker.read_chunk)
 
-        logger.debug(f"Completed recording loop, queue size: {queue.qsize()}")
-        await queue.put((start_ts, frames))
+        if queue.full():
+            # Analysis is behind: shed the oldest chunk so memory stays bounded
+            # and we keep analysing the most recent audio.
+            queue.get_nowait()
+            stats.chunks_dropped += 1
+            logger.warning("Analysis queue full (%d), dropped oldest chunk", queue.maxsize)
+        queue.put_nowait(item)
+        logger.debug("Queued chunk (queue size: %d)", queue.qsize())
 
 
 async def analysis_worker(
-    queue: asyncio.Queue[tuple[int, list[bytes]]], max_queue_size: int, w_dir: Path, config: BirdNetConfig
+    queue: asyncio.Queue[tuple[int, np.ndarray]],
+    analyser: Analyser,
 ) -> None:
     while True:
-        logger.debug("Analysis worker waiting for queue item")
-        # Get a "work item" out of the queue.
-        start_ts: int
-        frames: list[bytes]
-        start_ts, frames = await queue.get()
-        logger.debug(f"Picked up item from queue (queue size: {queue.qsize()})")
-        if queue.qsize() <= max_queue_size:
-            # analyse the file
-            signal: np.ndarray = convert_frame_to_signal(frames)
-            _ = analyse_recording(start_ts, signal, w_dir, config)
+        start_ts, signal = await queue.get()
+        try:
+            # Inference blocks for a while; keep it off the event loop so the
+            # recorder keeps capturing in the meantime.
+            await asyncio.to_thread(analyser.process, start_ts, signal)
+        except Exception:
+            logger.exception("Analysis failed for chunk starting at %d", start_ts)
+        finally:
+            del signal
 
-            # save the file
-            # EXCLUSION_LIST = ['Trichoglossus moluccanus_Rainbow Lorikeet','Cacatua galerita_Sulphur-crested Cockatoo','Strepera graculina_Pied Currawong','Alisterus scapularis_Australian King-Parrot','Fulica atra_Eurasian Cootz','Gymnorhina tibicen_Australian Magpie']
-            # if len(detections) == 1 and detections[0] not in EXCLUSION_LIST:
-            #     save_audio(detections[0], signal, start_ts, w_dir, config)
 
-            logger.debug("Analysis completed")
-        else:
-            logger.warning(
-                f"Queue size ({queue.qsize()}) exceeds max ({max_queue_size}), skipping analysis"
-            )
-
-        await asyncio.sleep(0.5)
-        # Notify the queue that the "work item" has been processed.
-        queue.task_done()
+async def summary_worker(stats: Stats, interval: float = SUMMARY_INTERVAL_SECONDS) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        stats.log_and_reset(interval)
 
 
 async def main() -> None:
@@ -422,12 +521,16 @@ async def main() -> None:
     logger.info("Bird-listener application starting")
 
     w_dir: Path = Path.cwd()
-    config = startup(w_dir)
-    max_queue_size: int = 6
+    db_dir = w_dir / "db"
+    _ = confirm_dir(db_dir)
+
+    config, weekly_masks = startup(w_dir)
+    stats = Stats()
+    analyser = Analyser(config, weekly_masks, db_dir / "bird-observations.db", stats)
+
     rate: int = config.sample_rate
-    record_seconds: int = 3
     period_size: int = 1024
-    queue: asyncio.Queue[tuple[int, list[bytes]]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[int, np.ndarray]] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
 
     # Find a working capture device
     logger.info(f"Preferred audio input device from config: {config.input_device}")
@@ -438,9 +541,9 @@ async def main() -> None:
         logger.error(f"Failed to find working capture device: {e}")
         raise
 
-    logger.info(f"Sample rate: {rate} Hz, Record duration: {record_seconds}s")
+    logger.info(f"Sample rate: {rate} Hz, chunk: {EXPECTED_SAMPLE_COUNT} samples")
 
-    input = alsaaudio.PCM(  # type: ignore
+    pcm = alsaaudio.PCM(  # type: ignore
         alsaaudio.PCM_CAPTURE,
         alsaaudio.PCM_NORMAL,
         channels=1,
@@ -449,19 +552,20 @@ async def main() -> None:
         periodsize=period_size,
         device=input_device,
     )
-    period_size = input.info().get("period_size", period_size)  # type: ignore
-    s: int = math.floor(record_seconds * (rate / period_size))
+    chunker = AudioChunker(pcm, stats)
 
     logger.info("Starting recording and analysis workers")
 
-    _ = await asyncio.gather(
-        asyncio.create_task(analysis_worker(queue, max_queue_size, w_dir, config)),
-        recording_worker(queue, input, s),
-    )
-
-    # Shut the stream
-    logger.info("Shutting down audio stream")
-    input.close()  # type: ignore
+    try:
+        _ = await asyncio.gather(
+            analysis_worker(queue, analyser),
+            recording_worker(queue, chunker, stats),
+            summary_worker(stats),
+        )
+    finally:
+        logger.info("Shutting down audio stream")
+        pcm.close()  # type: ignore
+        analyser.close()
 
 
 if __name__ == "__main__":

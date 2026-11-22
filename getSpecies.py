@@ -6,7 +6,22 @@ using the BirdNET metadata model. It predicts which species are likely
 to be present at a given location and time of year.
 """
 
+import datetime
+import math
+
 import numpy as np
+
+# The metadata model's notion of a week: 4 per month, 1-48
+WEEKS_PER_YEAR = 48
+
+
+def birdnet_week(date: datetime.date) -> int:
+    """Convert a date to the metadata model's week number (1-48, 4 per month).
+
+    This is not the ISO calendar week: BirdNET splits every month into four
+    "weeks" (days 1-7, 8-14, 15-21, 22-end), matching BirdNET-Analyzer.
+    """
+    return (date.month - 1) * 4 + min(4, math.ceil(date.day / 7))
 
 try:
     import tflite_runtime.interpreter as tflite  # type: ignore
@@ -131,6 +146,62 @@ class SpeciesPredictor:
         return sorted(species_list) if sort else species_list
 
 
+class WeeklySpeciesMasks:
+    """Location filter for every week of the year, computed once at startup.
+
+    Holds one boolean "species allowed" mask per BirdNET week, bit-packed
+    (48 x ~6.5k labels is ~40KB), so the metadata model can be freed after
+    startup while the filter still follows the time of year.
+    """
+
+    def __init__(self, packed: np.ndarray, num_labels: int):
+        self._packed = packed
+        self._num_labels = num_labels
+        self._cached_week: int | None = None
+        self._cached_mask: np.ndarray | None = None
+
+    def mask_for_week(self, week: int) -> np.ndarray:
+        """Boolean mask over labels for a week (1-48). All True if no species pass."""
+        mask = np.unpackbits(self._packed[week - 1], count=self._num_labels).astype(bool)
+        if not mask.any():
+            # Nothing passes the threshold for this location/week: don't
+            # filter at all rather than silently dropping every detection.
+            mask[:] = True
+        return mask
+
+    def for_date(self, date: datetime.date) -> tuple[int, np.ndarray, bool]:
+        """Mask for the given date.
+
+        Returns (week, mask, changed) where changed is True when the week
+        differs from the previous call (the mask is cached between calls).
+        """
+        week = birdnet_week(date)
+        changed = week != self._cached_week
+        if changed:
+            self._cached_week = week
+            self._cached_mask = self.mask_for_week(week)
+        return week, self._cached_mask, changed  # type: ignore[return-value]
+
+
+def build_weekly_masks(
+    lat: float, lon: float, num_labels: int, threshold: float
+) -> WeeklySpeciesMasks:
+    """Run the metadata model for all 48 weeks using the global predictor."""
+    if _predictor is None:
+        raise RuntimeError(
+            "Species predictor not initialized. Call init_species_predictor() first with the model path."
+        )
+    masks = np.zeros((WEEKS_PER_YEAR, num_labels), dtype=bool)
+    for week in range(1, WEEKS_PER_YEAR + 1):
+        scores = _predictor.predict_filter(lat, lon, week)
+        if len(scores) != num_labels:
+            raise ValueError(
+                f"Metadata model returned {len(scores)} scores but there are {num_labels} labels"
+            )
+        masks[week - 1] = scores >= threshold
+    return WeeklySpeciesMasks(np.packbits(masks, axis=1), num_labels)
+
+
 # Global predictor instance
 _predictor = None
 
@@ -182,3 +253,13 @@ def get_species_list(
         )
 
     return _predictor.get_species_list(lat, lon, week, labels, threshold, sort)
+
+
+def release_species_predictor() -> None:
+    """Drop the global species predictor so its interpreter memory can be freed.
+
+    The metadata model is only needed once at startup to build the species
+    list, so there is no reason to keep it resident for the life of the process.
+    """
+    global _predictor
+    _predictor = None
