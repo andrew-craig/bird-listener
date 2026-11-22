@@ -182,3 +182,13 @@ def get_species_list(
         )
 
     return _predictor.get_species_list(lat, lon, week, labels, threshold, sort)
+
+
+def release_species_predictor() -> None:
+    """Drop the global species predictor so its interpreter memory can be freed.
+
+    The metadata model is only needed once at startup to build the species
+    list, so there is no reason to keep it resident for the life of the process.
+    """
+    global _predictor
+    _predictor = None

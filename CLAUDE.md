@@ -10,9 +10,6 @@ A lightweight bird detection system adapted from [BirdNET-Analyzer](https://gith
 
 ### Initial Setup
 ```bash
-# Install system dependencies
-sudo apt-get install ffmpeg
-
 # Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # or `source venv/bin/activate` if using venv
@@ -26,7 +23,9 @@ Copy `.env.template` to `.env` and configure:
 - `TZ`: Timezone (e.g., "UTC")
 - `LATITUDE` and `LONGITUDE`: Location coordinates for species filtering
 - `INPUT_DEVICE_NAME`: ALSA audio input device (default: "default")
-- `LOG_LEVEL`: Logging level (INFO, DEBUG, etc.)
+- `LOG_LEVEL`: Logging level (INFO, DEBUG, etc.). At INFO, only detections, warnings/errors and an hourly summary are logged
+- `MIN_CONFIDENCE`: Detection threshold (default 0.05; BirdNET itself typically uses 0.25-0.5)
+- `TFLITE_THREADS`: CPU threads for inference (default 1)
 
 ### Model Installation
 Models are not included in the repository. Download BirdNET V2.4 models:
@@ -61,13 +60,33 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
+User=operator
+Group=operator
+SupplementaryGroups=audio
 ExecStart=/home/operator/bird-listener/venv/bin/python /home/operator/bird-listener/recordAnalyse.py
 WorkingDirectory=/home/operator/bird-listener
 Restart=on-failure
 RestartSec=5s
+# Fewer glibc malloc arenas: less memory fragmentation from worker threads
+Environment=MALLOC_ARENA_MAX=2
+# Hardening: a mic listener needs no root and only writes to db/
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/operator/bird-listener/db
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 
 [Install]
 WantedBy=multi-user.target
+```
+
+`ReadWritePaths` must exist before the unit starts, and the service user needs to own it and be in the `audio` group:
+```bash
+mkdir -p /home/operator/bird-listener/db
+sudo chown -R operator:operator /home/operator/bird-listener/db  # was root-owned if the service ran as root
+sudo usermod -aG audio operator
 ```
 
 Then:
@@ -81,11 +100,12 @@ sudo systemctl start bird-listener.service
 ### Core Components
 
 **recordAnalyse.py** - Main application entry point
-- Implements async producer-consumer pattern with two workers:
-  - `recording_worker`: Continuously records 3-second audio chunks via ALSA
-  - `analysis_worker`: Processes audio through BirdNET models
-- On startup, initializes models, loads location-filtered species list, and creates SQLite database
-- Detections are stored in `db/bird-observations.db` and optionally sent to weather-server API
+- Implements async producer-consumer pattern with a bounded queue (`MAX_QUEUE_SIZE`):
+  - `recording_worker`: `AudioChunker` reads exactly 144,000 samples per chunk from ALSA in a thread (`asyncio.to_thread`); when the queue is full the oldest chunk is dropped
+  - `analysis_worker`: runs `Analyser.process` in a thread so capture continues during inference
+  - `summary_worker`: logs an hourly INFO summary (chunks analysed/dropped, overruns, detections, avg inference time)
+- On startup, builds the location-filtered species list with the metadata model and then frees that model, loads the main model, and opens one long-lived SQLite connection
+- Detections are stored in `db/bird-observations.db` and sent to weather-server (`http.client` keep-alive connection, 5s timeout)
 
 **config.py** - Configuration management
 - `BirdNetConfig` dataclass: Immutable configuration loaded from environment variables
@@ -94,31 +114,31 @@ sudo systemctl start bird-listener.service
 
 **predict.py** - TFLite audio classification
 - `TFLitePredictor`: Wraps BirdNET classification model inference
+- Tensors are allocated once for a fixed `(1, 144000)` input; `predict()` takes a single float32 sample
 - Global singleton pattern via `init_predictor()` and `predict()` functions
 - `flat_sigmoid()`: Applies sigmoid activation for probability calibration
 
 **getSpecies.py** - Geographic/temporal species filtering
 - `SpeciesPredictor`: Uses metadata model to filter species by location and week
 - Reduces false positives by limiting predictions to regionally/seasonally appropriate species
-- Global singleton pattern similar to predict.py
+- Global singleton pattern similar to predict.py; `release_species_predictor()` frees it after startup
 
 ### Data Flow
 
-1. Audio capture: ALSA → 3-second chunks at 48kHz
-2. Queue management: Recording worker pushes to async queue
-3. Analysis: Consumer pulls from queue, converts to [-1, 1] range
-4. Species filtering: Geographic model pre-filters species list
-5. Classification: Main model predicts species from audio
-6. Post-processing: Apply sigmoid if configured, filter by confidence threshold
-7. Storage: Insert detections to SQLite, optionally POST to weather-server
+1. Audio capture: ALSA → exactly 144,000-sample (3s) int16 chunks at 48kHz
+2. Queue management: Recording worker pushes to a bounded queue, dropping the oldest chunk when full
+3. Analysis: Consumer pulls from queue, converts to float32 [-1, 1] in a reused buffer
+4. Classification: Main model predicts species from audio
+5. Post-processing: Apply sigmoid if configured; keep labels above threshold that are in the location-filtered species list (precomputed boolean mask)
+6. Storage: Insert detections to SQLite, POST each to weather-server
 
 ### Key Configuration Parameters
 
 - `sample_rate`: 48000 Hz (BirdNET requirement)
-- `min_confidence`: 0.05 (threshold for detections)
+- `min_confidence`: 0.05 (threshold for detections, `MIN_CONFIDENCE`)
 - `sigmoid_sensitivity`: 1.0 (calibration parameter)
 - `location_filter_threshold`: 0.03 (species filtering threshold)
-- `tflite_threads`: 1 (CPU threads for inference)
+- `tflite_threads`: 1 (CPU threads for inference, `TFLITE_THREADS`)
 
 ### BirdNET Analyzer Directory
 

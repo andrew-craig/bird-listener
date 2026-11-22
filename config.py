@@ -13,6 +13,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_number(name, default, cast, logger=None):
+    """Read a numeric environment variable, falling back to default if unset/invalid."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        if logger:
+            logger.error(f"Invalid {name} value '{raw}', using default {default}")
+        return default
+
+
 @dataclass(frozen=True)
 class BirdNetConfig:
     """BirdNET analyzer configuration.
@@ -103,11 +116,15 @@ class BirdNetConfig:
                 logger.error(f"Invalid LONGITUDE value '{longitude_str}', using default 20.0")
             longitude = 20.0
 
+        min_confidence = _env_number("MIN_CONFIDENCE", 0.05, float, logger)
+        tflite_threads = max(1, _env_number("TFLITE_THREADS", 1, int, logger))
+
         # Log the loaded values for debugging
         if logger:
             logger.info(f"LATITUDE: {latitude_str} -> {latitude}")
             logger.info(f"LONGITUDE: {longitude_str} -> {longitude}")
             logger.info(f"INPUT_DEVICE_NAME: {input_device}")
+            logger.info(f"MIN_CONFIDENCE: {min_confidence}, TFLITE_THREADS: {tflite_threads}")
 
         return cls(
             model_path=model_path,
@@ -117,6 +134,8 @@ class BirdNetConfig:
             latitude=latitude,
             longitude=longitude,
             input_device=input_device,
+            min_confidence=min_confidence,
+            tflite_threads=tflite_threads,
         )
 
     def with_runtime_data(
