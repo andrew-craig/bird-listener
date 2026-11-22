@@ -104,13 +104,13 @@ sudo systemctl start bird-listener.service
   - `recording_worker`: `AudioChunker` reads exactly 144,000 samples per chunk from ALSA in a thread (`asyncio.to_thread`); when the queue is full the oldest chunk is dropped
   - `analysis_worker`: runs `Analyser.process` in a thread so capture continues during inference
   - `summary_worker`: logs an hourly INFO summary (chunks analysed/dropped, overruns, detections, avg inference time)
-- On startup, builds the location-filtered species list with the metadata model and then frees that model, loads the main model, and opens one long-lived SQLite connection
+- On startup, runs the metadata model for all 48 BirdNET weeks to build a per-week species mask (`WeeklySpeciesMasks`, ~40KB bit-packed), frees that model, loads the main model, and opens one long-lived SQLite connection
 - Detections are stored in `db/bird-observations.db` and sent to weather-server (`http.client` keep-alive connection, 5s timeout)
 
 **config.py** - Configuration management
 - `BirdNetConfig` dataclass: Immutable configuration loaded from environment variables
 - `from_env()`: Creates config from environment with sensible defaults
-- `with_runtime_data()`: Adds labels and species list after initialization
+- `with_runtime_data()`: Adds labels after initialization
 
 **predict.py** - TFLite audio classification
 - `TFLitePredictor`: Wraps BirdNET classification model inference
@@ -120,6 +120,8 @@ sudo systemctl start bird-listener.service
 
 **getSpecies.py** - Geographic/temporal species filtering
 - `SpeciesPredictor`: Uses metadata model to filter species by location and week
+- `birdnet_week()`: Date → BirdNET week (1-48, four per month; *not* the ISO week)
+- `build_weekly_masks()` / `WeeklySpeciesMasks`: Precomputes the filter for every week so it follows the season without reloading the model
 - Reduces false positives by limiting predictions to regionally/seasonally appropriate species
 - Global singleton pattern similar to predict.py; `release_species_predictor()` frees it after startup
 
@@ -129,7 +131,7 @@ sudo systemctl start bird-listener.service
 2. Queue management: Recording worker pushes to a bounded queue, dropping the oldest chunk when full
 3. Analysis: Consumer pulls from queue, converts to float32 [-1, 1] in a reused buffer
 4. Classification: Main model predicts species from audio
-5. Post-processing: Apply sigmoid if configured; keep labels above threshold that are in the location-filtered species list (precomputed boolean mask)
+5. Post-processing: Apply sigmoid if configured; keep labels above threshold that are allowed by the species mask for the chunk's BirdNET week (local date)
 6. Storage: Insert detections to SQLite, POST each to weather-server
 
 ### Key Configuration Parameters

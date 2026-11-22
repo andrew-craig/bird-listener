@@ -180,14 +180,14 @@ def find_working_capture_device(preferred_device: str) -> str:
     raise RuntimeError(error_msg)
 
 
-def startup(w_dir: Path) -> BirdNetConfig:
-    """Initialize models and return configuration.
+def startup(w_dir: Path) -> tuple[BirdNetConfig, getSpecies.WeeklySpeciesMasks]:
+    """Initialize models and return configuration and the weekly species filter.
 
     Args:
         w_dir: Working directory path
 
     Returns:
-        BirdNetConfig instance with all runtime data loaded
+        BirdNetConfig instance with labels loaded, and the per-week species masks
     """
     logger.info("Starting up bird-listener application")
     models_dir = w_dir / "models"
@@ -203,20 +203,18 @@ def startup(w_dir: Path) -> BirdNetConfig:
     # Load labels from file
     labels = config.labels_file.read_text(encoding="utf-8").splitlines()
 
-    # Calculate current week for species filtering
-    week = datetime.date.today().isocalendar()[1]
-
-    # The metadata model is only needed once, to build the species list. Load
-    # it, use it, and free it before loading the (much larger) main model so
-    # its memory can be reused rather than staying resident forever.
+    # The metadata model is only needed at startup: compute the location
+    # filter for all 48 BirdNET weeks now, then free the model before loading
+    # the (much larger) main model. The analyser picks the mask for the
+    # current date, so the filter follows the season without reloading.
     logger.info(f"Initializing species predictor with model: {config.mdata_model_path}")
     getSpecies.init_species_predictor(str(config.mdata_model_path), config.tflite_threads)
-    species_list = getSpecies.get_species_list(
-        config.latitude, config.longitude, week, labels, config.location_filter_threshold
+    weekly_masks = getSpecies.build_weekly_masks(
+        config.latitude, config.longitude, len(labels), config.location_filter_threshold
     )
     getSpecies.release_species_predictor()
     gc.collect()
-    logger.info(f"Loaded {len(species_list)} species for location filtering")
+    logger.info("Computed location species filter for all 48 weeks")
 
     # Initialize the TFLite predictor with the model
     logger.info(f"Initializing TFLite predictor with model: {config.model_path}")
@@ -226,7 +224,7 @@ def startup(w_dir: Path) -> BirdNetConfig:
     logger.info("TFLite predictor initialized successfully")
 
     # Return config with runtime data loaded
-    return config.with_runtime_data(labels, species_list)
+    return config.with_runtime_data(labels), weekly_masks
 
 
 @dataclass
@@ -368,20 +366,17 @@ class Analyser:
     at a time.
     """
 
-    def __init__(self, config: BirdNetConfig, db_path: Path, stats: Stats):
+    def __init__(
+        self,
+        config: BirdNetConfig,
+        weekly_masks: getSpecies.WeeklySpeciesMasks,
+        db_path: Path,
+        stats: Stats,
+    ):
         self.config = config
+        self.weekly_masks = weekly_masks
         self.stats = stats
         self.labels = config.labels
-
-        # Boolean mask of labels allowed by the location filter. Replaces a
-        # linear "label in tuple" lookup per prediction.
-        if config.species_list:
-            allowed = set(config.species_list)
-            self.allowed_mask = np.fromiter(
-                (label in allowed for label in self.labels), dtype=bool, count=len(self.labels)
-            )
-        else:
-            self.allowed_mask = np.ones(len(self.labels), dtype=bool)
 
         # Reused for every chunk: int16 -> float32 [-1, 1] without temporaries
         self._input = np.empty(EXPECTED_SAMPLE_COUNT, dtype=np.float32)
@@ -422,9 +417,20 @@ class Analyser:
                 pred, sensitivity=-1, bias=self.config.sigmoid_sensitivity
             )
 
+        # Location/season filter for the chunk's local date (cached per week)
+        week, allowed_mask, changed = self.weekly_masks.for_date(
+            datetime.date.fromtimestamp(start_ts)
+        )
+        if changed:
+            logger.info(
+                "Species filter set for BirdNET week %d: %d species",
+                week,
+                int(allowed_mask.sum()),
+            )
+
         # Only the few labels above threshold (and allowed for this location)
         # are pulled out and sorted, instead of sorting all ~6.5k labels.
-        idx = np.flatnonzero((pred > self.config.min_confidence) & self.allowed_mask)
+        idx = np.flatnonzero((pred > self.config.min_confidence) & allowed_mask)
         if idx.size == 0:
             logger.debug("No detections above confidence threshold")
             return []
@@ -518,9 +524,9 @@ async def main() -> None:
     db_dir = w_dir / "db"
     _ = confirm_dir(db_dir)
 
-    config = startup(w_dir)
+    config, weekly_masks = startup(w_dir)
     stats = Stats()
-    analyser = Analyser(config, db_dir / "bird-observations.db", stats)
+    analyser = Analyser(config, weekly_masks, db_dir / "bird-observations.db", stats)
 
     rate: int = config.sample_rate
     period_size: int = 1024

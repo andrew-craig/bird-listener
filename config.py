@@ -63,7 +63,6 @@ class BirdNetConfig:
     # Runtime data (loaded during initialization)
     labels: tuple[str, ...] = ()
     translated_labels: tuple[str, ...] = ()
-    species_list: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, models_dir: Path, logger=None) -> "BirdNetConfig":
@@ -138,16 +137,11 @@ class BirdNetConfig:
             tflite_threads=tflite_threads,
         )
 
-    def with_runtime_data(
-        self,
-        labels: list[str],
-        species_list: list[str],
-    ) -> "BirdNetConfig":
+    def with_runtime_data(self, labels: list[str]) -> "BirdNetConfig":
         """Create a new config instance with runtime data loaded.
 
         Args:
             labels: List of species labels loaded from the labels file
-            species_list: List of species filtered by location and time
 
         Returns:
             A new Config instance with runtime data populated
@@ -156,5 +150,4 @@ class BirdNetConfig:
             self,
             labels=tuple(labels),
             translated_labels=tuple(labels),  # Same as labels for now
-            species_list=tuple(species_list),
         )
